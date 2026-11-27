@@ -136,11 +136,11 @@ def _wrap(text: str, width: int = 22) -> str:
     return "\n".join(lines)
 
 
-def write_srt(cues: list, path: Path, duration: float) -> None:
+def write_srt(cues: list, path: Path, duration: float, wrap: int = 22) -> None:
     out = []
     n = 0
     for i, c in enumerate(cues):
-        text = _wrap(c["ko"])
+        text = _wrap(c["ko"], wrap)
         if not text:
             continue
         s = c["s"]
@@ -181,14 +181,14 @@ def _font_dir() -> str:
 
 def burn(video: Path, srt: Path, out: Path) -> None:
     w, h = _video_size(video)
-    size = max(int(min(w, h) * 0.05), 14) if w and h else 18
-    style = f"FontSize={size},Outline=2,Shadow=0,MarginV={max(int(size * 1.6), 20)},Bold=1"
+    # SRT subtitles live on a 384x288 canvas that is stretched to the video, so the font size is
+    # given in those units: ~6% of the short side in real pixels.
+    size = max(round(0.06 * min(w, h) * 288 / h), 8) if w and h else 16
+    style = f"FontSize={size},Outline=1.5,Shadow=0,MarginV={int(size * 2.2)},Bold=1"
     work = Path(tempfile.mkdtemp(prefix="aria_burn_"))
     try:
         shutil.copy(srt, work / "s.srt")               # simple name: no quoting problems in the filter
         flt = f"subtitles=s.srt:force_style='{style}'"
-        if w and h:
-            flt = f"subtitles=s.srt:original_size={w}x{h}:force_style='{style}'"
         fd = _font_dir()
         if fd:
             flt += f":fontsdir='{fd}'" if not re.match(r"^[A-Za-z]:", fd) else ""
@@ -231,7 +231,9 @@ def main() -> None:
             del audio
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
-        write_srt(cues, srt, duration)
+        w, h = _video_size(video)
+        wrap = max(16, min(int(18 * w / min(w, h)), 34)) if w and h else 22
+        write_srt(cues, srt, duration, wrap)
         print(f"      자막 파일 저장: {srt}")
     elif not srt.is_file():
         sys.exit(f"자막 파일이 없습니다: {srt}")
