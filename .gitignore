@@ -18,3 +18,7 @@ server-package/
 *.tar.gz
 _to_trash*/
 dc_post/
+
+# example bank built from other people's subtitles: local only (repo is public)
+src/realtime_subtitles/youtube_subs/examples.json
+src/realtime_subtitles/youtube_subs/style.txt

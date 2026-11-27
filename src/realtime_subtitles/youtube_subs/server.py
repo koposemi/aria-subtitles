@@ -165,7 +165,17 @@ MOAN_CHARS_RE = re.compile(
     r"^[あいうえおぁぃぅぇぉんっゃゅょはひふへほアイウエオァィゥェォンッャュョハヒフヘホ"
     r"ー〜～\s、。．,.!！?？…・♡♥]+$")
 # Short words written only with those sounds that do carry meaning.
-MOAN_KEEP = {"はい", "いい", "うん", "ううん", "ええ", "いえ", "おい", "へえ", "ほう", "うそ", "あい"}
+# Short words written only with those sounds that do carry meaning ("yes", "good", "no", "hey",
+# "a lie"). Back-channel sounds such as うん/ええ/へえ are treated like moans: no subtitle, no
+# translation request.
+MOAN_KEEP = {"はい", "いい", "いえ", "おい", "うそ"}
+# Korean side of the same thing (reference subtitles): "응", "음", "아아" ... carry no dialogue.
+KO_FILLER_RE = re.compile(r"^[아어오우으응음흐하앗읏흡흑헉흠아앙읍]{1,4}$")
+
+
+def is_filler_ko(text: str) -> bool:
+    core = re.sub(r"[\s\-/.,!?~…♡♥*()]", "", text)
+    return not core or bool(KO_FILLER_RE.match(core))
 
 
 def is_moan(text: str) -> bool:
@@ -173,6 +183,65 @@ def is_moan(text: str) -> bool:
     if not core:
         return True
     return core not in MOAN_KEEP and bool(MOAN_CHARS_RE.match(text))
+
+
+PUNCT_END = "。！？!?…"
+LONG_END_RE = re.compile(r"(?:です|ます|ました|でした|ません|ください|ですか|ますか)$")
+PUNCT_SOFT = "、,，"
+
+
+def words_to_lines(words: list, offset: float) -> list:
+    """Word timestamps -> short subtitle lines [(start, end, text)] (about 6-20 characters each).
+
+    Used instead of Groq's segment times, which in about a third of windows are placeholder
+    values on a 2-second grid; word times are real. Lines end at sentence ends and pauses; an
+    over-long line is cut after its last comma rather than inside a word, and a 1-2 character
+    leftover ("ま。" of a drawn-out "ただ…いま") is joined to its neighbour."""
+    lines, cur = [], []                      # cur: [(start, end, text), ...] of the open line
+
+    def flush(ws):
+        if ws:
+            lines.append([ws[0][0], ws[-1][1], "".join(w[2] for w in ws)])
+
+    for ws, we, w in words:
+        w = w.strip()
+        if not w or (len(w) >= 3 and is_moan(w)):   # moans get no subtitle (1-2 char words are particles: keep)
+            continue
+        a, b = offset + ws, offset + we
+        if cur:
+            gap = a - cur[-1][1]
+            n = sum(len(x[2]) for x in cur)
+            ended = SENTENCE_END_RE.search("".join(x[2] for x in cur))
+            if gap > 0.45 or (n >= 10 and gap > 0.12) or (ended and n >= 5 and gap > 0.2):
+                flush(cur)
+                cur = []
+            elif n + len(w) > 20:
+                cut = max((i for i, x in enumerate(cur) if x[2][-1] in PUNCT_SOFT + PUNCT_END), default=None)
+                if cut is not None and cut < len(cur) - 1:
+                    flush(cur[:cut + 1])
+                    cur = cur[cut + 1:]
+                else:
+                    flush(cur)
+                    cur = []
+        cur.append((a, b, w))
+        text = "".join(x[2] for x in cur)
+        # Immediate line end only on punctuation or an unmistakable ending (です/ます/...); a
+        # one-character ending (だ, た, な ...) may be inside a word ("ただいま"), so it only ends
+        # the line when a pause follows (checked above).
+        if text[-1] in PUNCT_END or (text[-1] in PUNCT_SOFT and len(text) >= 8)                 or (len(text) >= 7 and LONG_END_RE.search(text)):
+            flush(cur)
+            cur = []
+    flush(cur)
+    merged = []
+    for ln in lines:
+        core = re.sub(r"[、。．,.!！?？…\s「」『』()（）]", "", ln[2])
+        if not core:                                   # punctuation only
+            continue
+        if merged and len(core) <= 2 and ln[0] - merged[-1][1] < 2.5 and len(merged[-1][2]) < 24                 and merged[-1][2][-1] not in PUNCT_END:
+            merged[-1][1], merged[-1][2] = ln[1], merged[-1][2] + ln[2]
+        else:
+            merged.append(ln)
+    return [tuple(x) for x in merged]
 
 
 # Split points inside one subtitle line: after sentence-ending punctuation.
@@ -308,7 +377,7 @@ class Engines:
                 self.last_asr = "groq"
                 return []
             try:
-                segments = self.groq.transcribe(audio)
+                segments = self.groq.transcribe(audio, words=True)
                 self.last_asr = "groq"
                 return segments
             except GroqUnavailable as e:
@@ -1287,7 +1356,9 @@ class JobManager:
                 cut = start + max(segs[-1].end, 0.0) if segs[-1].end > win - 1.5 else end
             cut = min(end, max(cut, start + 2.0))
 
-        sentences = self._merge(segs, start)
+        # Lines from word times when Groq gave them (its segment times are often placeholders).
+        words = [w for s in segs for w in (getattr(s, "words", None) or [])]
+        sentences = words_to_lines(words, start) if words else self._merge(segs, start)
         if sentences:
             sentences = self._align_cue_starts(sentences, chunk, start)
         with job.lock:

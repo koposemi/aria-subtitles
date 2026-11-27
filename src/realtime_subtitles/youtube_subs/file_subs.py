@@ -48,36 +48,7 @@ def extract_audio(video: Path, raw: Path) -> float:
     return raw.stat().st_size / 2 / SR
 
 
-PUNCT_END = "。！？!?…"
-PUNCT_SOFT = "、,，"
-
-
-def words_to_lines(words: list, offset: float) -> list:
-    """Word timestamps -> short subtitle lines [(start, end, text)] (about 6-16 characters each)."""
-    out, cur = [], None
-    for ws, we, w in words:
-        w = w.strip()
-        if not w or (len(w) >= 3 and S.is_moan(w)):   # moans get no subtitle (1-2 char words are particles: keep)
-            continue
-        we = min(we, ws + 1.0)             # Whisper often drags a word's end through silence/noise
-        a, b = offset + ws, offset + we
-        if cur is not None:
-            gap = a - cur[1]
-            n = len(cur[2])
-            if gap > 0.45 or (n >= 10 and gap > 0.12) or n + len(w) > 20:
-                out.append(tuple(cur))
-                cur = None
-        if cur is None:
-            cur = [a, b, w]
-        else:
-            cur[1] = b
-            cur[2] += w
-        if cur[2][-1] in PUNCT_END or (cur[2][-1] in PUNCT_SOFT and len(cur[2]) >= 8)                 or (len(cur[2]) >= 7 and S.SENTENCE_END_RE.search(cur[2])):
-            out.append(tuple(cur))
-            cur = None
-    if cur is not None:
-        out.append(tuple(cur))
-    return out
+words_to_lines = S.words_to_lines      # shared with the live server
 
 
 def asr_window(engines: S.Engines, chunk: np.ndarray):

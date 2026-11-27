@@ -188,17 +188,29 @@ class GroqPool:
         parts.append(f"--{boundary}--\r\n".encode())
         data = self.call(ASR_MODEL, "/audio/transcriptions", b"".join(parts),
                          f"multipart/form-data; boundary={boundary}", timeout=60)
-        segments = []
+        words = fix_word_times([(float(w["start"]), float(w["end"]), w.get("word") or "")
+                                for w in (data.get("words") or [])])
+        self.last_words = words
+        segments, wi = [], 0
         for s in data.get("segments") or []:
             text = (s.get("text") or "").strip()
+            # Groq lists the words of the whole window in order: take this segment's share.
+            need, got, mine = len(_norm(text)), 0, []
+            while wi < len(words) and got < need:
+                mine.append(words[wi])
+                got += len(_norm(words[wi][2]))
+                wi += 1
             # Whisper invents text over music/silence; Groq reports how likely that is.
             if not text or (s.get("no_speech_prob", 0) > 0.6 and s.get("avg_logprob", 0) < -0.8):
                 continue
             if HALLUCINATION_RE.search(text):
                 continue
-            segments.append(Segment(float(s["start"]), float(s["end"]), text))
-        self.last_words = [(float(w["start"]), float(w["end"]), w.get("word") or "")
-                           for w in (data.get("words") or [])]
+            start, end = float(s["start"]), float(s["end"])
+            if mine and abs(got - need) <= max(2, need // 5):
+                start, end = mine[0][0], mine[-1][1]     # segment times are often 2-second placeholders
+            seg = Segment(start, end, text)
+            seg.words = mine
+            segments.append(seg)
         return segments
 
     # ---- translation
@@ -213,7 +225,8 @@ class GroqPool:
         user = (("이전 자막 (참고용, 번역하지 말 것):\n" + ctx + "\n\n") if ctx else "") + \
                "번역할 자막:\n" + numbered
         last_error = None
-        system = MT_SYSTEM + glossary_text(lines, GLOSSARY_MODE)
+        from . import examples
+        system = MT_SYSTEM + glossary_text(lines, GLOSSARY_MODE) + examples.prompt_text(lines)
         for n, model in enumerate(MT_MODELS):
             body = {"model": model, "temperature": 0.2, "max_tokens": 1500,
                     "response_format": {"type": "json_object"},
@@ -264,11 +277,28 @@ def glossary_text(lines: list[str], mode: str) -> str:
 
 
 class Segment:
-    """Same fields the server reads from faster-whisper segments."""
-    __slots__ = ("start", "end", "text")
+    """Same fields the server reads from faster-whisper segments (+ the words with their times)."""
+    __slots__ = ("start", "end", "text", "words")
 
     def __init__(self, start: float, end: float, text: str) -> None:
         self.start, self.end, self.text = start, end, text
+        self.words = []
+
+
+def _norm(text: str) -> str:
+    return re.sub(r"[\s、。．,.!！?？…・「」『』()（）]", "", text)
+
+
+def fix_word_times(words: list) -> list:
+    """Whisper gives the silence (or moaning) before a word to that word, so a long word's start
+    is too early while its end is right: keep the end, start where the word would really begin."""
+    out = []
+    for s, e, w in words:
+        est = max(0.3, 0.16 * len(_norm(w)) + 0.15)
+        if e - s > max(1.0, est * 2.5):
+            s = e - est
+        out.append((s, e, w))
+    return out
 
 
 # Phrases Whisper is known to invent over silence/music in Japanese videos.
