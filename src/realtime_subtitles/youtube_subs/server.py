@@ -1438,16 +1438,47 @@ def _collect_name(page: str) -> str:
     return re.sub(r"[^A-Za-z0-9_-]", "", seg[-1]).upper() if seg else ""
 
 
+def _audio_rendition(master_url: str, playlist: str) -> str:
+    """URL of the audio-only playlist in a master playlist (EXT-X-MEDIA TYPE=AUDIO), or ""."""
+    best, first = "", ""
+    for line in playlist.splitlines():
+        line = line.strip()
+        if not line.startswith("#EXT-X-MEDIA:") or "TYPE=AUDIO" not in line:
+            continue
+        uri = re.search(r'URI="([^"]+)"', line)
+        if not uri:
+            continue
+        url = urljoin(master_url, uri.group(1))
+        first = first or url
+        if "DEFAULT=YES" in line and not best:
+            best = url
+    return best or first
+
+
+def _collect_inputs(manager, media: str, referer: str) -> list:
+    """Streams to read for a collection, best first. Audio-only playlist when the site has one:
+    the master playlist itself makes ffmpeg fetch the biggest video, which is what was slow."""
+    if not manager._is_hls(media):
+        return [media]
+    text = manager._playlist_text(media, referer)
+    audio = _audio_rendition(media, text)
+    if audio:
+        return [audio]
+    variants = [url for url, _ in manager._master_variants(media, text)]
+    return variants[:1] or [media]          # cheapest video variant (sound is in it) as last resort
+
+
 def _collect_worker(manager, name: str, media: str, referer: str) -> None:
     out = COLLECT_DIR / f"{name}.m4a"
     tmp = COLLECT_DIR / f"{name}.part.m4a"
     try:
         COLLECT_DIR.mkdir(parents=True, exist_ok=True)
-        for url in manager._stream_candidates(media, referer):          # cheapest variant first
+        for url in _collect_inputs(manager, media, referer):
             cmd = [manager._ffmpeg_executable(), "-nostdin", "-loglevel", "error", "-y",
                    *manager._media_input(url, referer), "-vn", "-t", str(COLLECT_SEC),
                    "-ac", "1", "-ar", "16000", "-c:a", "aac", "-b:a", "32k", "-f", "ipod", str(tmp)]
             t0 = time.time()
+            info(f"collect: {name} reading {url[-60:]}")
             r = subprocess.run(cmd, capture_output=True, timeout=COLLECT_SEC * 3 + 120)
             if r.returncode == 0 and tmp.exists() and tmp.stat().st_size > COLLECT_SEC * 1500:
                 tmp.replace(out)
