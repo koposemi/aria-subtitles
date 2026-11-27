@@ -75,6 +75,11 @@ MODELS_DIR = PROJECT_ROOT / "models"
 CACHE_DIR = Path(os.environ["ARIA_CACHE_DIR"]) if os.environ.get("ARIA_CACHE_DIR") \
     else PROJECT_ROOT / "cache" / "youtube"
 TMP_DIR = CACHE_DIR / "tmp"
+# ARIA_COLLECT=1: instead of making subtitles, save the first COLLECT_SEC of each stream the phone's
+# player opens as a small audio file (for building a reference set; see /collect).
+COLLECT = os.environ.get("ARIA_COLLECT") == "1"
+COLLECT_SEC = int(os.environ.get("ARIA_COLLECT_SEC", "1500"))
+COLLECT_DIR = Path(os.environ["ARIA_COLLECT_DIR"]) if os.environ.get("ARIA_COLLECT_DIR")     else PROJECT_ROOT / "cache" / "collect"
 ASR_MODEL_DIR = MODELS_DIR / "kotoba-whisper-v2.0-faster"       # optional local fallback
 NLLB_MODEL_DIR = MODELS_DIR / "nllb-200-distilled-600M-ct2-int8"  # optional local fallback
 
@@ -1424,6 +1429,56 @@ def lan_addresses() -> list:
     return out
 
 
+_collecting: set = set()
+_collect_lock = threading.Lock()
+
+
+def _collect_name(page: str) -> str:
+    seg = [s for s in urlparse(page).path.split("/") if s]
+    return re.sub(r"[^A-Za-z0-9_-]", "", seg[-1]).upper() if seg else ""
+
+
+def _collect_worker(manager, name: str, media: str, referer: str) -> None:
+    out = COLLECT_DIR / f"{name}.m4a"
+    tmp = COLLECT_DIR / f"{name}.part.m4a"
+    try:
+        COLLECT_DIR.mkdir(parents=True, exist_ok=True)
+        for url in manager._stream_candidates(media, referer):          # cheapest variant first
+            cmd = [manager._ffmpeg_executable(), "-nostdin", "-loglevel", "error", "-y",
+                   *manager._media_input(url, referer), "-vn", "-t", str(COLLECT_SEC),
+                   "-ac", "1", "-ar", "16000", "-c:a", "aac", "-b:a", "32k", "-f", "ipod", str(tmp)]
+            t0 = time.time()
+            r = subprocess.run(cmd, capture_output=True, timeout=COLLECT_SEC * 3 + 120)
+            if r.returncode == 0 and tmp.exists() and tmp.stat().st_size > COLLECT_SEC * 1500:
+                tmp.replace(out)
+                info(f"collect: {name} saved {out.stat().st_size // 1024} KB in {time.time() - t0:.0f}s")
+                return
+            warning(f"collect: {name} failed via {url[:60]}: {r.stderr.decode('utf-8', 'replace')[-150:]}")
+    except Exception as e:
+        warning(f"collect: {name} error {e}")
+    finally:
+        tmp.unlink(missing_ok=True)
+        with _collect_lock:
+            _collecting.discard(name)
+
+
+def collect_poll(manager, page: str, media: str) -> dict:
+    name = _collect_name(page)
+    base = {"status": "processing", "cues": [], "covered": [], "duration": 0, "progress": {}}
+    if not name:
+        return {**base, "message": "수집: 품번을 알 수 없는 주소"}
+    if (COLLECT_DIR / f"{name}.m4a").exists():
+        return {**base, "message": f"수집 완료: {name}"}
+    if not media:
+        return {**base, "message": f"수집 대기: {name} (재생을 시작하세요)"}
+    with _collect_lock:
+        if name not in _collecting:
+            _collecting.add(name)
+            threading.Thread(target=_collect_worker, args=(manager, name, media, page_referer(page)),
+                             daemon=True).start()
+    return {**base, "message": f"수집 중: {name}"}
+
+
 class Handler(BaseHTTPRequestHandler):
     manager: JobManager = None  # set in main()
     token: str = ""
@@ -1549,6 +1604,9 @@ class Handler(BaseHTTPRequestHandler):
             # Older userscripts don't send "playing"; treat them as playing.
             playing = (q.get("playing") or ["1"])[0] != "0"
             retry = (q.get("retry") or ["0"])[0] == "1"
+            if COLLECT:
+                self._json(200, collect_poll(self.manager, page, media))
+                return
             data = self.manager.poll(key, t, source, media, playing, "playing" in q, retry,
                                      referer=page_referer(source))
             if (q.get("win") or ["0"])[0] == "1":
@@ -1557,6 +1615,11 @@ class Handler(BaseHTTPRequestHandler):
                 data["cues"] = [c for c in data["cues"] if c["e"] >= lo and c["s"] <= hi]
                 data["window"] = [round(lo, 2), round(hi, 2)]
             self._json(200, data)
+            return
+        if url.path == "/collect":
+            self._json(200, {"enabled": COLLECT, "dir": str(COLLECT_DIR), "files": sorted(
+                f"{p.name} {p.stat().st_size // 1024}KB" for p in COLLECT_DIR.glob("*.m4a")) if COLLECT_DIR.exists() else [],
+                "working": sorted(_collecting)})
             return
         if url.path in ("/aria.user.js", "/aria-youtube.user.js"):
             # Opening this in the browser lets Tampermonkey / Userscripts install the script,
