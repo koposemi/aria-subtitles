@@ -48,6 +48,51 @@ def extract_audio(video: Path, raw: Path) -> float:
     return raw.stat().st_size / 2 / SR
 
 
+PUNCT_END = "。！？!?…"
+PUNCT_SOFT = "、,，"
+
+
+def words_to_lines(words: list, offset: float) -> list:
+    """Word timestamps -> short subtitle lines [(start, end, text)] (about 6-16 characters each)."""
+    out, cur = [], None
+    for ws, we, w in words:
+        w = w.strip()
+        if not w:
+            continue
+        a, b = offset + ws, offset + we
+        if cur is not None:
+            gap = a - cur[1]
+            n = len(cur[2])
+            if gap > 0.45 or (n >= 10 and gap > 0.12) or n + len(w) > 20:
+                out.append(tuple(cur))
+                cur = None
+        if cur is None:
+            cur = [a, b, w]
+        else:
+            cur[1] = b
+            cur[2] += w
+        if cur[2][-1] in PUNCT_END or (cur[2][-1] in PUNCT_SOFT and len(cur[2]) >= 8)                 or (len(cur[2]) >= 7 and S.SENTENCE_END_RE.search(cur[2])):
+            out.append(tuple(cur))
+            cur = None
+    if cur is not None:
+        out.append(tuple(cur))
+    return out
+
+
+def asr_window(engines: S.Engines, chunk: np.ndarray):
+    """One window -> (segments, words); waits and retries while Groq is rate limited."""
+    if not S.speech_regions(chunk, min_silence_ms=500):
+        return [], []
+    from .groq_client import GroqUnavailable
+    while True:
+        try:
+            segs = engines.groq.transcribe(chunk, words=True)
+            return [s for s in segs if s.text.strip() and s.end - s.start >= 0.2], engines.groq.last_words
+        except GroqUnavailable as e:
+            warning(f"Groq 대기 중 ({e}) - 30초 뒤 다시 시도")
+            time.sleep(30)
+
+
 def make_cues(engines: S.Engines, audio: np.ndarray, duration: float) -> list:
     cues: list = []
     start = 0.0
@@ -57,14 +102,7 @@ def make_cues(engines: S.Engines, audio: np.ndarray, duration: float) -> list:
         end = min(start + WINDOW, duration)
         is_last = end >= duration - 0.05
         chunk = audio[int(start * SR):int(end * SR)].astype(np.float32) / 32768.0
-        while True:
-            try:
-                segs = [s for s in engines.transcribe(chunk)
-                        if s.text.strip() and s.end - s.start >= 0.2]
-                break
-            except S.CloudUnavailable as e:
-                warning(f"Groq 대기 중 ({e}) - 30초 뒤 다시 시도")
-                time.sleep(30)
+        segs, words = asr_window(engines, chunk)
         cut = end
         if not is_last and segs and end - start > 5:       # same sentence-boundary cut as the server
             win = end - start
@@ -81,7 +119,14 @@ def make_cues(engines: S.Engines, audio: np.ndarray, duration: float) -> list:
             else:
                 cut = start + max(segs[-1].end, 0.0) if segs[-1].end > win - 1.5 else end
             cut = min(end, max(cut, start + 2.0))
-        sentences = S.JobManager._merge(segs, start)
+        if words:
+            # keep only words inside the accepted segments (drops hallucinated / cut-off ones)
+            words = [w for w in words
+                     if any(s.start - 0.15 <= (w[0] + w[1]) / 2 <= s.end + 0.15 for s in segs)
+                     and start + w[0] < cut]
+            sentences = words_to_lines(words, start)
+        else:
+            sentences = S.JobManager._merge(segs, start)
         if sentences:
             sentences = S.JobManager._align_cue_starts(sentences, chunk, start)
         kept = []
@@ -143,11 +188,11 @@ def write_srt(cues: list, path: Path, duration: float, wrap: int = 22) -> None:
         text = _wrap(c["ko"], wrap)
         if not text:
             continue
-        s = c["s"]
-        e = max(c["e"], s + 1.2)                       # short lines stay readable
-        e = min(e, s + 7.0)
+        s = max(c["s"] - 0.1, 0.0)                     # appear a hair early: reads as "in sync"
+        e = max(c["e"] + 0.25, s + 0.9)                # short lines stay readable
+        e = min(e, s + 5.0)
         if i + 1 < len(cues):
-            e = min(e, max(cues[i + 1]["s"] - 0.05, s + 0.3))
+            e = min(e, max(cues[i + 1]["s"] - 0.12, s + 0.3))
         e = min(e, duration)
         n += 1
         out.append(f"{n}\n{_ts(s)} --> {_ts(e)}\n{text}\n")
@@ -170,28 +215,22 @@ def _video_size(video: Path) -> tuple:
         return 0, 0
 
 
-def _font_dir() -> str:
-    for pat in ("/system/fonts/*CJK*", "/system/fonts/*Nanum*", "/system/fonts/*Korean*",
-                "/system/fonts/*Gothic*", "C:/Windows/Fonts/malgun.ttf"):
-        hits = glob.glob(pat)
-        if hits:
-            return str(Path(hits[0]).parent)
-    return ""
+FONT_DIR = Path(__file__).resolve().parents[3] / "fonts"       # bundled Pretendard (OFL)
 
 
 def burn(video: Path, srt: Path, out: Path) -> None:
     w, h = _video_size(video)
     # SRT subtitles live on a 384x288 canvas that is stretched to the video, so the font size is
     # given in those units: ~6% of the short side in real pixels.
-    size = max(round(0.06 * min(w, h) * 288 / h), 8) if w and h else 16
-    style = f"FontSize={size},Outline=1.5,Shadow=0,MarginV={int(size * 2.2)},Bold=1"
+    size = max(round(0.065 * min(w, h) * 288 / h), 8) if w and h else 16
+    style = (f"FontName=Pretendard SemiBold,FontSize={size},Bold=0,Outline={max(size * 0.09, 1):.1f},"
+             f"Shadow={max(size * 0.04, 0.5):.1f},MarginV={int(size * 2.2)}")
     work = Path(tempfile.mkdtemp(prefix="aria_burn_"))
     try:
         shutil.copy(srt, work / "s.srt")               # simple name: no quoting problems in the filter
-        flt = f"subtitles=s.srt:force_style='{style}'"
-        fd = _font_dir()
-        if fd:
-            flt += f":fontsdir='{fd}'" if not re.match(r"^[A-Za-z]:", fd) else ""
+        for f in FONT_DIR.glob("*.otf"):
+            shutil.copy(f, work / f.name)
+        flt = f"subtitles=s.srt:fontsdir=.:force_style='{style}'"
         cmd = [_ffmpeg(), "-nostdin", "-loglevel", "error", "-stats", "-y", "-i", str(video),
                "-vf", flt, "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
                "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart", str(out)]
