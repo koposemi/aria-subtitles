@@ -57,8 +57,9 @@ def words_to_lines(words: list, offset: float) -> list:
     out, cur = [], None
     for ws, we, w in words:
         w = w.strip()
-        if not w:
+        if not w or (len(w) >= 3 and S.is_moan(w)):   # moans get no subtitle (1-2 char words are particles: keep)
             continue
+        we = min(we, ws + 1.0)             # Whisper often drags a word's end through silence/noise
         a, b = offset + ws, offset + we
         if cur is not None:
             gap = a - cur[1]
@@ -181,16 +182,16 @@ def _wrap(text: str, width: int = 22) -> str:
     return "\n".join(lines)
 
 
-def write_srt(cues: list, path: Path, duration: float, wrap: int = 22) -> None:
+def write_srt(cues: list, path: Path, duration: float, wrap: int = 22, shift: float = 0.0) -> None:
     out = []
     n = 0
     for i, c in enumerate(cues):
         text = _wrap(c["ko"], wrap)
         if not text:
             continue
-        s = max(c["s"] - 0.1, 0.0)                     # appear a hair early: reads as "in sync"
-        e = max(c["e"] + 0.25, s + 0.9)                # short lines stay readable
-        e = min(e, s + 5.0)
+        s = max(c["s"] - 0.1 + shift, 0.0)             # appear a hair early: reads as "in sync"
+        e = max(c["e"] + 0.25 + shift, s + 0.9)        # short lines stay readable
+        e = min(e, s + max(1.4, 0.8 + 0.25 * len(c["ko"])))   # ...but never hang around much longer than reading takes
         if i + 1 < len(cues):
             e = min(e, max(cues[i + 1]["s"] - 0.12, s + 0.3))
         e = min(e, duration)
@@ -258,6 +259,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="영상 파일에 한국어 자막 만들기")
     ap.add_argument("video")
     ap.add_argument("--no-burn", action="store_true", help=".srt 만 만들고 영상에는 입히지 않음")
+    ap.add_argument("--shift", type=float, default=None, metavar="초",
+                    help="자막 시간을 이만큼 옮김 (+는 늦게, -는 일찍). 인식은 다시 하지 않고 저장해 둔 결과로 다시 만듭니다")
     ap.add_argument("--burn-only", action="store_true", help="이미 있는 .srt 로 영상에 입히기만 함")
     a = ap.parse_args()
 
@@ -267,7 +270,16 @@ def main() -> None:
     srt = video.with_suffix(".srt")
     out = video.with_name(video.stem + ".자막.mp4")
 
-    if not a.burn_only:
+    cues_json = video.with_suffix(".cues.json")
+    shift = a.shift or 0.0
+    if a.shift is not None and cues_json.is_file():            # re-time only: no recognition, no Groq
+        saved = json.loads(cues_json.read_text(encoding="utf-8"))
+        w, h = _video_size(video)
+        wrap = max(16, min(int(18 * w / min(w, h)), 34)) if w and h else 22
+        write_srt(saved["cues"], srt, saved["duration"], wrap, shift)
+        media_scan(srt)
+        print(f"      저장해 둔 인식 결과로 자막 시간을 {shift:+.2f}초 옮겼습니다: {srt}")
+    elif not a.burn_only:
         engines = S.Engines()
         engines.load()
         tmp = Path(tempfile.mkdtemp(prefix="aria_file_"))
@@ -284,7 +296,9 @@ def main() -> None:
             shutil.rmtree(tmp, ignore_errors=True)
         w, h = _video_size(video)
         wrap = max(16, min(int(18 * w / min(w, h)), 34)) if w and h else 22
-        write_srt(cues, srt, duration, wrap)
+        write_srt(cues, srt, duration, wrap, shift)
+        cues_json.write_text(json.dumps({"duration": duration, "cues": cues}, ensure_ascii=False),
+                             encoding="utf-8")
         media_scan(srt)
         print(f"      자막 파일 저장: {srt}")
     elif not srt.is_file():
