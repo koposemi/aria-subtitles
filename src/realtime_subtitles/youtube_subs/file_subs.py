@@ -242,6 +242,18 @@ def burn(video: Path, srt: Path, out: Path) -> None:
         shutil.rmtree(work, ignore_errors=True)
 
 
+def media_scan(path: Path) -> None:
+    """Tell Android's gallery about a new file (files written from Termux are not listed otherwise)."""
+    try:
+        if shutil.which("termux-media-scan"):
+            subprocess.run(["termux-media-scan", str(path)], capture_output=True, timeout=20)
+        elif shutil.which("am"):
+            subprocess.run(["am", "broadcast", "-a", "android.intent.action.MEDIA_SCANNER_SCAN_FILE",
+                            "-d", "file://" + str(path)], capture_output=True, timeout=20)
+    except Exception:
+        pass
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="영상 파일에 한국어 자막 만들기")
     ap.add_argument("video")
@@ -273,6 +285,7 @@ def main() -> None:
         w, h = _video_size(video)
         wrap = max(16, min(int(18 * w / min(w, h)), 34)) if w and h else 22
         write_srt(cues, srt, duration, wrap)
+        media_scan(srt)
         print(f"      자막 파일 저장: {srt}")
     elif not srt.is_file():
         sys.exit(f"자막 파일이 없습니다: {srt}")
@@ -280,7 +293,8 @@ def main() -> None:
     if not a.no_burn:
         print("[3/3] 영상에 자막 입히기")
         burn(video, srt, out)
-        print(f"      저장 완료: {out}")
+        media_scan(out)
+        print(f"      저장 완료: {out}  (갤러리에 안 보이면 갤러리 앱을 닫았다 다시 여세요)")
     print("끝.")
 
 
