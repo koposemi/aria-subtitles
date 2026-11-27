@@ -178,11 +178,34 @@ def is_filler_ko(text: str) -> bool:
     return not core or bool(KO_FILLER_RE.match(core))
 
 
+# Sound effects written as words: kisses, licking, slurping, slapping ...
+SFX_WORDS = {"チュ", "チュッ", "チュッチュ", "チュパ", "チュパチュパ", "ジュル", "ジュルジュル", "ペロ",
+             "ペロペロ", "パンパン", "クチュ", "クチュクチュ", "ヌチャ", "ズボ", "ズボズボ", "ゴクン", "ゴックン"}
+# Short words that still mean something when cut off with っ ("いやっ" = "no!").
+SHORT_KEEP = MOAN_KEEP | {"いや", "やだ", "だめ", "ダメ", "ヤダ", "イヤ", "もう", "ほら", "どう", "やめ", "まって"}
+
+
 def is_moan(text: str) -> bool:
-    core = re.sub(r"[\s、。．,.!！?？…・♡♥ー〜～っッ]", "", text)
+    """True for lines that get no subtitle and no translation request: moans, back-channel
+    sounds (うん), sound effects (チュッ, あ゛ー) and stray English fragments ("me")."""
+    raw = re.sub(r"[\s、。．,.!！?？…・♡♥ー〜～]", "", text)
+    core = re.sub(r"[っッ]", "", raw)
     if not core:
         return True
-    return core not in MOAN_KEEP and bool(MOAN_CHARS_RE.match(text))
+    if core in MOAN_KEEP:
+        return False
+    if MOAN_CHARS_RE.match(text):
+        return True
+    plain = raw.rstrip("っッ")
+    if raw in SFX_WORDS or plain in SFX_WORDS:
+        return True
+    if ("゛" in raw or "゜" in raw) and len(raw) <= 6:      # "あ゛ー": a voiced vowel is a scream, not a word
+        return True
+    if raw[-1] in "っッ" and len(raw) <= 3 and plain not in SHORT_KEEP:   # cut-off sound: "んっ", "チュッ"
+        return True
+    if re.fullmatch(r"[a-z]{1,3}", raw):                    # Whisper slipping into English: "me", "oh"
+        return True
+    return False
 
 
 PUNCT_END = "。！？!?…"

@@ -304,7 +304,7 @@ def fix_word_times(words: list) -> list:
 # Phrases Whisper is known to invent over silence/music in Japanese videos.
 HALLUCINATION_RE = re.compile(
     r"(ご視聴ありがとうございました|チャンネル登録(を)?お願いします|字幕(は|作成)|"
-    r"ご覧いただきありがとうございます|最後までご視聴|おやすみなさい。?$)")
+    r"ご覧いただきありがとうございます|最後までご視聴|おやすみなさい。?$|私はこれを知っています)")
 
 MT_SYSTEM = (
     "당신은 일본어 영상의 한국어 자막 번역가입니다. 입력은 음성 인식 결과라서 구두점이 없거나 "
