@@ -295,7 +295,7 @@ def fix_word_times(words: list) -> list:
     out = []
     for s, e, w in words:
         est = max(0.3, 0.16 * len(_norm(w)) + 0.15)
-        if e - s > max(1.0, est * 2.5):
+        if e - s > max(0.7, est * 2.0):        # thresholds tuned on 24 videos (tools/train/timing_check.py)
             s = e - est
         out.append((s, e, w))
     return out
