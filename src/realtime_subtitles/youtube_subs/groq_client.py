@@ -166,7 +166,7 @@ class GroqPool:
         raise GroqUnavailable("모든 Groq 키가 한도에 도달했습니다")
 
     # ---- speech recognition
-    def transcribe(self, audio: np.ndarray, words: bool = False) -> list:
+    def transcribe(self, audio: np.ndarray, words: bool = False, prompt: str = "", model: str = "") -> list:
         """Japanese speech -> segments with .start/.end/.text (seconds from window start)."""
         pcm = np.clip(audio * 32768.0, -32768, 32767).astype(np.int16)
         wav = io.BytesIO()
@@ -176,8 +176,11 @@ class GroqPool:
             w.setframerate(SAMPLE_RATE)
             w.writeframes(pcm.tobytes())
         boundary = uuid.uuid4().hex
-        fields = [("model", ASR_MODEL), ("language", "ja"), ("response_format", "verbose_json"),
+        model = model or ASR_MODEL
+        fields = [("model", model), ("language", "ja"), ("response_format", "verbose_json"),
                   ("temperature", "0"), ("timestamp_granularities[]", "segment")]
+        if prompt:                      # treated by Whisper as preceding text: biases words/style
+            fields.append(("prompt", prompt))
         if words:       # word-level times for precisely timed, short subtitle lines (file_subs.py)
             fields.append(("timestamp_granularities[]", "word"))
         parts = []
@@ -186,7 +189,7 @@ class GroqPool:
         parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="window.wav"\r\n'
                      f'Content-Type: audio/wav\r\n\r\n'.encode() + wav.getvalue() + b"\r\n")
         parts.append(f"--{boundary}--\r\n".encode())
-        data = self.call(ASR_MODEL, "/audio/transcriptions", b"".join(parts),
+        data = self.call(model, "/audio/transcriptions", b"".join(parts),
                          f"multipart/form-data; boundary={boundary}", timeout=60)
         words = fix_word_times([(float(w["start"]), float(w["end"]), w.get("word") or "")
                                 for w in (data.get("words") or [])])
