@@ -243,6 +243,26 @@ def burn(video: Path, srt: Path, out: Path) -> None:
         shutil.rmtree(work, ignore_errors=True)
 
 
+def cues_from_text(path: Path, duration: float) -> list:
+    """Hand-made subtitles: lines like "1:12 대사 / (남자) 대사"  (start time only; a line lasts
+    until it has been read or the next line starts). Returns cues for write_srt."""
+    items = []
+    for line in path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+        m = re.match(r"^\s*(?:(\d+):)?(\d{1,2}):(\d{2})(?:[.,](\d{1,3}))?\s+(.+?)\s*$", line)
+        if not m:
+            continue
+        h, mi, s, ms, text = m.groups()
+        start = int(h or 0) * 3600 + int(mi) * 60 + int(s) + (int(ms.ljust(3, "0")) / 1000 if ms else 0)
+        parts = [x.strip() for x in text.split(" / ") if x.strip()]
+        items.append((start, "\n".join(parts)))
+    cues = []
+    for i, (start, text) in enumerate(items):
+        nxt = items[i + 1][0] if i + 1 < len(items) else duration
+        end = min(nxt - 0.1, start + max(2.0, 0.9 + 0.22 * len(text.replace("\n", ""))))
+        cues.append({"s": start + 0.1, "e": max(end, start + 1.0), "ja": "", "ko": text})
+    return cues
+
+
 def media_scan(path: Path) -> None:
     """Tell Android's gallery about a new file (files written from Termux are not listed otherwise)."""
     try:
@@ -261,6 +281,7 @@ def main() -> None:
     ap.add_argument("--no-burn", action="store_true", help=".srt 만 만들고 영상에는 입히지 않음")
     ap.add_argument("--shift", type=float, default=None, metavar="초",
                     help="자막 시간을 이만큼 옮김 (+는 늦게, -는 일찍). 인식은 다시 하지 않고 저장해 둔 결과로 다시 만듭니다")
+    ap.add_argument("--text", metavar="파일", help="직접 만든 자막 텍스트('분:초 대사' 형식)를 영상에 넣음")
     ap.add_argument("--burn-only", action="store_true", help="이미 있는 .srt 로 영상에 입히기만 함")
     a = ap.parse_args()
 
@@ -272,7 +293,24 @@ def main() -> None:
 
     cues_json = video.with_suffix(".cues.json")
     shift = a.shift or 0.0
-    if a.shift is not None and cues_json.is_file():            # re-time only: no recognition, no Groq
+    if a.text:                                                 # use a ready-made text instead of recognition
+        tp = Path(a.text).expanduser().resolve()
+        if not tp.is_file():
+            sys.exit(f"텍스트 파일이 없습니다: {tp}")
+        duration = float(subprocess.run(
+            [shutil.which("ffprobe") or "ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "csv=p=0", str(video)], capture_output=True).stdout.decode().strip() or 0)
+        cues = cues_from_text(tp, duration)
+        if not cues:
+            sys.exit("텍스트에서 '분:초 대사' 줄을 찾지 못했습니다")
+        if srt.is_file():
+            shutil.copy(srt, srt.with_suffix(".auto.srt"))     # keep the machine-made one
+        w, h = _video_size(video)
+        wrap = max(16, min(int(18 * w / min(w, h)), 34)) if w and h else 22
+        write_srt(cues, srt, duration, wrap, shift)
+        media_scan(srt)
+        print(f"      텍스트 {len(cues)}줄로 자막 파일을 만들었습니다: {srt}")
+    elif a.shift is not None and cues_json.is_file():            # re-time only: no recognition, no Groq
         saved = json.loads(cues_json.read_text(encoding="utf-8"))
         w, h = _video_size(video)
         wrap = max(16, min(int(18 * w / min(w, h)), 34)) if w and h else 22
