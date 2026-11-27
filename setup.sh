@@ -36,6 +36,8 @@ fi
 echo "[4/4] 'aria' 명령 만들기 + Termux를 열면 자동 시작"
 printf '#!/data/data/com.termux/files/usr/bin/bash\nexec bash "%s/start.sh" "$@"\n' "$APP" > "$PREFIX/bin/aria"
 chmod +x "$PREFIX/bin/aria"
+printf '#!/data/data/com.termux/files/usr/bin/bash\nexec bash "%s/file.sh" "$@"\n' "$APP" > "$PREFIX/bin/aria-file"
+chmod +x "$PREFIX/bin/aria-file"
 touch "$HOME/.bashrc"
 grep -qx 'aria' "$HOME/.bashrc" || echo aria >> "$HOME/.bashrc"
 
