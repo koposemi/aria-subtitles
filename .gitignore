@@ -1,26 +1,20 @@
-# 비밀/개인 설정 (절대 올리지 않음)
 groq_key*
 *_key.txt
 mobile_token*
 settings.json
 .env
-
-# 실행 중 생기는 것
 cache/
 logs/
 models/
 __pycache__/
 *.pyc
 *.bak
-
-# 옛 PC 앱 코드 (모바일 서버는 쓰지 않음)
 src/realtime_subtitles/translation/
 src/realtime_subtitles/settings_manager.py
-
-# PC 전용 / 만들어지는 파일
 python/
 tablet/
 server-package/
 *.zip
 *.tar.gz
 _to_trash*/
+dc_post/
